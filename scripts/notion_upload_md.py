@@ -16,8 +16,8 @@ Options:
     --database DB_ID       Target database ID
     --parent PAGE_ID       Target parent page ID
     --title TITLE          Page title (default: filename stem)
-    --title-prop NAME      Title property name in the database (default: Name)
-    --prop KEY=VALUE       Database property (repeatable). e.g. --prop 'Tags=note'
+    --class-name NAME      Database select property value (if applicable)
+    --summary TEXT         Database text property value (if applicable)
     --update PAGE_ID       Replace all content of an existing page
     --append PAGE_ID       Append content to an existing page
     --dry-run              Print generated blocks without writing to Notion
@@ -30,6 +30,7 @@ import re
 import sys
 from pathlib import Path
 from notion_client import Client
+from notion_client.errors import APIResponseError
 
 # ── Token ──────────────────────────────────────────────
 
@@ -83,7 +84,8 @@ def _make_rich_text(text: str, anno_type: str | None = None, link_url: str | Non
 def parse_inline(text: str) -> list[dict]:
     """Convert inline Markdown text to Notion rich_text array.
 
-    Supports: **bold**, *italic*, `code`, $inline-equation$, [link](url), ~~strike~~.
+    Supports: **bold**, *italic*, `code`, $inline-equation$, [link](url), ~~strike~~,
+              nested formatting (e.g. **bold `code`**), backslash escapes (\\*, \\$).
     """
     if not text:
         return []
@@ -91,19 +93,36 @@ def parse_inline(text: str) -> list[dict]:
     tokens = []
     pos = 0
     n = len(text)
-    plain_start = 0  # beginning of current unwritten plain text segment
+    plain_start = 0
 
     while pos < n:
+        # E3: backslash escape — next char is literal
+        if text[pos] == '\\' and pos + 1 < n:
+            if pos > plain_start:
+                tokens.append(_make_rich_text(text[plain_start:pos]))
+            tokens.append(_make_rich_text(text[pos + 1]))
+            pos += 2
+            plain_start = pos
+            continue
+
         markers = list(_scan_markers(text, pos))
 
         if markers:
-            # Emit plain text preceding this marker
             if pos > plain_start:
                 tokens.append(_make_rich_text(text[plain_start:pos]))
 
             _start, end, fn = markers[0]
             t, anno, link_url, is_eq = fn()
-            tokens.append(_make_rich_text(t, anno_type=anno, link_url=link_url, equation=is_eq))
+
+            # E2: nested formatting — recurse inside bold/italic/strikethrough
+            if anno and anno != "code":
+                inner = parse_inline(t)
+                for tok in inner:
+                    if tok["type"] == "text":
+                        tok["annotations"] = {**tok["annotations"], **ANNOTATIONS[anno]}
+                    tokens.append(tok)
+            else:
+                tokens.append(_make_rich_text(t, anno_type=anno, link_url=link_url, equation=is_eq))
 
             pos = end
             plain_start = pos
@@ -176,17 +195,6 @@ def _scan_markers(text: str, pos: int):
 
 # ── Block-level Parser ─────────────────────────────────
 
-def _clean_equation_body(body: str) -> str:
-    """Strip wrapper artifacts from equation body."""
-    body = body.strip()
-    # Remove outer $$ if present
-    if body.startswith("$$") and body.endswith("$$"):
-        body = body[2:-2]
-    # Remove outer $ if present
-    elif body.startswith("$") and body.endswith("$"):
-        body = body[1:-1]
-    return body
-
 
 def md_to_blocks(text: str) -> list[dict]:
     """Convert Markdown source text to a list of Notion block objects."""
@@ -229,7 +237,6 @@ def md_to_blocks(text: str) -> list[dict]:
             # One-liner: $$ ... $$
             if stripped.endswith("$$") and len(stripped) > 4:
                 expression = stripped[2:-2].strip()
-                expression = _clean_equation_body(expression)
                 blocks.append({
                     "object": "block",
                     "type": "equation",
@@ -245,7 +252,6 @@ def md_to_blocks(text: str) -> list[dict]:
                 i += 1
             i += 1  # skip closing $$
             expression = "\n".join(eq_lines).strip()
-            expression = _clean_equation_body(expression)
             blocks.append({
                 "object": "block",
                 "type": "equation",
@@ -366,7 +372,8 @@ def md_to_blocks(text: str) -> list[dict]:
         para_lines = []
         while i < n and lines[i].strip() and \
                 not lines[i].startswith(("#", "- ", "* ", "+ ", "> ", "```", "$$", "|")) and \
-                not re.match(r"^\d+\.\s", lines[i]):
+                not re.match(r"^\d+\.\s", lines[i]) and \
+                lines[i].strip() not in ("---", "***", "___"):
             para_lines.append(lines[i])
             i += 1
 
@@ -414,7 +421,7 @@ def _build_table_blocks(lines: list[str]) -> list[dict]:
     for row in rows:
         while len(row) < col_count:
             row.append("")
-        cells = [[{"type": "text", "text": {"content": c}}] for c in row]
+        cells = [parse_inline(c) if parse_inline(c) else [{"type": "text", "text": {"content": c}}] for c in row]
         children.append({
             "object": "block",
             "type": "table_row",
@@ -448,11 +455,14 @@ def _write_blocks(client: Client, parent_id: str, blocks: list[dict]):
 def create_page(client: Client, title: str, content: str, *,
                 database_id: str = "", parent_id: str = "",
                 props: list[str] | None = None, title_prop: str = "Name",
+                class_name: str = "", summary: str = "",
                 dry_run: bool = False) -> str:
     """Create a new Notion page and fill it with content blocks.
 
-    props: list of "key=value" strings for database property values.
+    props: list of "key=value" strings for generic rich_text properties.
     title_prop: name of the title property in the database (default "Name").
+    class_name: shorthand that creates a select property named "Class".
+    summary: shorthand that creates a rich_text property named "内容".
     """
     if props is None:
         props = []
@@ -466,7 +476,35 @@ def create_page(client: Client, title: str, content: str, *,
             if "=" not in p:
                 continue
             k, v = p.split("=", 1)
-            properties[k.strip()] = {"rich_text": [{"text": {"content": v.strip()}}]}
+            k = k.strip()
+            v = v.strip()
+            # "Key:type=Value" — type defaults to rich_text
+            if ":" in k:
+                k, ptype = k.split(":", 1)
+                k = k.strip()
+                ptype = ptype.strip()
+            else:
+                ptype = "rich_text"
+
+            if ptype == "select":
+                properties[k] = {"select": {"name": v}}
+            elif ptype == "number":
+                try:
+                    v_num = float(v) if "." in v else int(v)
+                except ValueError:
+                    v_num = v
+                properties[k] = {"number": v_num}
+            elif ptype == "date":
+                properties[k] = {"date": {"start": v}}
+            elif ptype == "checkbox":
+                properties[k] = {"checkbox": v.lower() in ("yes", "true", "1", "checked")}
+            else:
+                properties[k] = {"rich_text": [{"text": {"content": v}}]}
+        # Shorthand: --class-name → select property (not rich_text)
+        if class_name:
+            properties["Class"] = {"select": {"name": class_name}}
+        if summary:
+            properties["内容"] = {"rich_text": [{"text": {"content": summary}}]}
     elif parent_id:
         parent = {"type": "page_id", "page_id": parent_id.replace("-", "")}
         properties = {"title": [{"text": {"content": title}}]}
@@ -491,14 +529,9 @@ def create_page(client: Client, title: str, content: str, *,
     return page_id
 
 
-def replace_page_content(client: Client, page_id: str, content: str, dry_run: bool = False):
+def replace_page_content(client: Client, page_id: str, content: str):
     """Delete all children of a page and write new content."""
     pid = page_id.replace("-", "")
-
-    if dry_run:
-        blocks = md_to_blocks(content)
-        print(f"=== DRY RUN: would replace content of page {pid} with {len(blocks)} blocks ===")
-        return
 
     # Delete existing children (handle pagination — API returns max 100 per page)
     all_children = []
@@ -516,16 +549,10 @@ def replace_page_content(client: Client, page_id: str, content: str, dry_run: bo
     _write_blocks(client, pid, blocks)
 
 
-def append_to_page(client: Client, page_id: str, content: str, dry_run: bool = False):
+def append_to_page(client: Client, page_id: str, content: str):
     """Append content blocks to an existing page."""
     pid = page_id.replace("-", "")
-
     blocks = md_to_blocks(content)
-
-    if dry_run:
-        print(f"=== DRY RUN: would append {len(blocks)} blocks to page {pid} ===")
-        return
-
     _write_blocks(client, pid, blocks)
 
 
@@ -539,7 +566,7 @@ def main():
 Examples:
     # Create page in a database (with property values)
     python3 notion_upload_md.py notes.md --database YOUR_DB_ID \\
-        --title "My Note" --prop "Tags=course" --prop "Status=draft"
+        --title "My Note" --class-name "Course" --summary "Key takeaways"
 
     # Create page under a parent page
     python3 notion_upload_md.py notes.md --parent PAGE_ID --title "My Notes"
@@ -561,11 +588,16 @@ Examples:
     parser.add_argument("--title-prop", default="Name", help="Name of the title property in the database (default: Name)")
     parser.add_argument("--prop", action="append", default=[], metavar="KEY=VALUE",
                         help="Database property (repeatable). e.g. --prop 'Tags=important'")
+    parser.add_argument("--class-name", default="", help="[shorthand] Same as --prop 'Class=VALUE'")
+    parser.add_argument("--summary", default="", help="[shorthand] Same as --prop '内容=VALUE'")
     parser.add_argument("--update", default="", help="Replace all content of an existing page ID")
     parser.add_argument("--append", default="", help="Append content to an existing page ID")
     parser.add_argument("--dry-run", action="store_true", help="Print blocks without writing to Notion")
 
     args = parser.parse_args()
+
+    # Shorthand: --class-name / --summary are handled in create_page() directly
+    # (class_name → select type, summary → rich_text)
 
     filepath = Path(args.file)
     if not filepath.exists():
@@ -593,6 +625,7 @@ Examples:
             create_page(None, title, content,
                        database_id=args.database, parent_id=args.parent,
                        props=args.prop, title_prop=args.title_prop,
+                       class_name=args.class_name, summary=args.summary,
                        dry_run=True)
         return
 
@@ -606,19 +639,23 @@ Examples:
 
     try:
         if args.update:
-            replace_page_content(client, args.update, content, dry_run=False)
+            replace_page_content(client, args.update, content)
             pid = args.update.replace("-", "")
             print(f"页面已更新: https://www.notion.so/{pid}")
         elif args.append:
-            append_to_page(client, args.append, content, dry_run=False)
+            append_to_page(client, args.append, content)
             pid = args.append.replace("-", "")
             print(f"内容已追加: https://www.notion.so/{pid}")
         else:
             page_id = create_page(client, title, content,
                                  database_id=args.database, parent_id=args.parent,
                                  props=args.prop, title_prop=args.title_prop,
+                                 class_name=args.class_name, summary=args.summary,
                                  dry_run=False)
             print(f"页面已创建: https://www.notion.so/{page_id.replace('-', '')}")
+    except APIResponseError as e:
+        print(f"Notion API 错误 [{e.code}]: {e.body}", file=sys.stderr)
+        sys.exit(1)
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)
