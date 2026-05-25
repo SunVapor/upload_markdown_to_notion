@@ -500,9 +500,16 @@ def replace_page_content(client: Client, page_id: str, content: str, dry_run: bo
         print(f"=== DRY RUN: would replace content of page {pid} with {len(blocks)} blocks ===")
         return
 
-    # Delete existing children (paginated)
-    children = client.blocks.children.list(pid)
-    for child in children.get("results", []):
+    # Delete existing children (handle pagination — API returns max 100 per page)
+    all_children = []
+    cursor = None
+    while True:
+        resp = client.blocks.children.list(pid, start_cursor=cursor)
+        all_children.extend(resp.get("results", []))
+        if not resp.get("has_more"):
+            break
+        cursor = resp["next_cursor"]
+    for child in all_children:
         client.blocks.delete(child["id"])
 
     blocks = md_to_blocks(content)

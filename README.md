@@ -18,39 +18,39 @@ Instead of passing large page content through MCP tools (which burns tokens), th
 
 ```bash
 pip install notion-client
-python3 notion_upload_md.py <file.md> [OPTIONS]
+python3 scripts/notion_upload_md.py <file.md> [OPTIONS]
 ```
 
 ### Create a page in a Notion database
 
 ```bash
-python3 notion_upload_md.py lecture.md \
-  --database 27982023103981a999dee7afbbd12bb4 \
-  --title "CP16 Semantic Analysis" \
-  --class-name "Compiler" \
-  --summary "SDD, S-attributed definitions"
+python3 scripts/notion_upload_md.py lecture.md \
+  --database YOUR_DATABASE_ID \
+  --title "Lecture Notes" \
+  --prop "Tags=course" \
+  --prop "Status=draft"
 ```
 
 ### Create a page under a parent page
 
 ```bash
-python3 notion_upload_md.py notes.md --parent PAGE_ID --title "My Notes"
+python3 scripts/notion_upload_md.py notes.md --parent PAGE_ID --title "My Notes"
 ```
 
 ### Update an existing page
 
 ```bash
 # Full content replacement
-python3 notion_upload_md.py fixed.md --update PAGE_ID
+python3 scripts/notion_upload_md.py fixed.md --update PAGE_ID
 
 # Append to existing page
-python3 notion_upload_md.py appendix.md --append PAGE_ID
+python3 scripts/notion_upload_md.py appendix.md --append PAGE_ID
 ```
 
 ### Preview without writing
 
 ```bash
-python3 notion_upload_md.py test.md --dry-run
+python3 scripts/notion_upload_md.py test.md --dry-run
 ```
 
 ## Markdown Support
