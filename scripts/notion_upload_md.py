@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-将本地 Markdown 文件直接写入 Notion Page，通过 notion_client API，不经过 LLM/MCP 上下文。
+Upload local Markdown files to Notion pages via notion_client API.
 
-用法:
+Usage:
     python3 notion_upload_md.py <file.md> [OPTIONS]
 
-Token 来源 (优先级):
-    1. 环境变量 NOTION_TOKEN (推荐)
-    2. ~/.claude/.credentials.json 中的 MCP OAuth token (fallback)
+Token sources (priority):
+    1. Environment variable NOTION_TOKEN
+    2. File ~/.notion_token
 
-前置:
-    notion_client 已安装 (pip install notion-client)
+Prerequisites:
+    pip install notion-client
 
-选项:
-    --database DB_ID       目标数据库 ID (如 Class Notes: 27982023103981a999dee7afbbd12bb4)
-    --parent PAGE_ID        普通父页面 ID
-    --title "CPxx 标题"     页面标题 (默认取文件名 stem)
-    --class-name "编译原理"  数据库 Class 属性值
-    --summary "内容摘要"     数据库 内容 属性值
-    --update PAGE_ID        替换已有页面全部内容
-    --append PAGE_ID        追加到已有页面末尾
-    --dry-run              只打印生成的 blocks，不实际写入
+Options:
+    --database DB_ID       Target database ID
+    --parent PAGE_ID       Target parent page ID
+    --title TITLE          Page title (default: filename stem)
+    --title-prop NAME      Title property name in the database (default: Name)
+    --prop KEY=VALUE       Database property (repeatable). e.g. --prop 'Tags=note'
+    --update PAGE_ID       Replace all content of an existing page
+    --append PAGE_ID       Append content to an existing page
+    --dry-run              Print generated blocks without writing to Notion
 """
 
 import argparse
@@ -447,20 +447,26 @@ def _write_blocks(client: Client, parent_id: str, blocks: list[dict]):
 
 def create_page(client: Client, title: str, content: str, *,
                 database_id: str = "", parent_id: str = "",
-                class_name: str = "", summary: str = "",
+                props: list[str] | None = None, title_prop: str = "Name",
                 dry_run: bool = False) -> str:
-    """Create a new Notion page and fill it with content blocks."""
+    """Create a new Notion page and fill it with content blocks.
 
-    # Determine parent
+    props: list of "key=value" strings for database property values.
+    title_prop: name of the title property in the database (default "Name").
+    """
+    if props is None:
+        props = []
+
     if database_id:
         parent = {"type": "database_id", "database_id": database_id.replace("-", "")}
-        properties = {
-            "Name": {"title": [{"text": {"content": title}}]},
+        properties: dict = {
+            title_prop: {"title": [{"text": {"content": title}}]},
         }
-        if class_name:
-            properties["Class"] = {"select": {"name": class_name}}
-        if summary:
-            properties["内容"] = {"rich_text": [{"text": {"content": summary}}]}
+        for p in props:
+            if "=" not in p:
+                continue
+            k, v = p.split("=", 1)
+            properties[k.strip()] = {"rich_text": [{"text": {"content": v.strip()}}]}
     elif parent_id:
         parent = {"type": "page_id", "page_id": parent_id.replace("-", "")}
         properties = {"title": [{"text": {"content": title}}]}
@@ -524,14 +530,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Create in Class Notes database
-    python3 notion_upload_md.py CP16.md --database 27982023103981a999dee7afbbd12bb4 \\
-        --title "CP16 语义分析" --class-name "编译原理" --summary "语义分析基础"
+    # Create page in a database (with property values)
+    python3 notion_upload_md.py notes.md --database YOUR_DB_ID \\
+        --title "My Note" --prop "Tags=course" --prop "Status=draft"
 
-    # Create as standalone page
-    python3 notion_upload_md.py notes.md --title "My Notes"
+    # Create page under a parent page
+    python3 notion_upload_md.py notes.md --parent PAGE_ID --title "My Notes"
 
-    # Update existing page
+    # Update existing page (full content replacement)
     python3 notion_upload_md.py notes.md --update PAGE_ID
 
     # Append to existing page
@@ -542,11 +548,12 @@ Examples:
         """,
     )
     parser.add_argument("file", help="Path to local .md file")
-    parser.add_argument("--database", default="", help="Target database ID (e.g. Class Notes UUID)")
+    parser.add_argument("--database", default="", help="Target database ID")
     parser.add_argument("--parent", default="", help="Target parent page ID")
     parser.add_argument("--title", default="", help="Page title (default: filename stem)")
-    parser.add_argument("--class-name", default="", help="Class property value (database mode)")
-    parser.add_argument("--summary", default="", help="内容 property value (database mode)")
+    parser.add_argument("--title-prop", default="Name", help="Name of the title property in the database (default: Name)")
+    parser.add_argument("--prop", action="append", default=[], metavar="KEY=VALUE",
+                        help="Database property (repeatable). e.g. --prop 'Tags=important'")
     parser.add_argument("--update", default="", help="Replace all content of an existing page ID")
     parser.add_argument("--append", default="", help="Append content to an existing page ID")
     parser.add_argument("--dry-run", action="store_true", help="Print blocks without writing to Notion")
@@ -578,7 +585,7 @@ Examples:
         else:
             create_page(None, title, content,
                        database_id=args.database, parent_id=args.parent,
-                       class_name=args.class_name, summary=args.summary,
+                       props=args.prop, title_prop=args.title_prop,
                        dry_run=True)
         return
 
@@ -602,7 +609,7 @@ Examples:
         else:
             page_id = create_page(client, title, content,
                                  database_id=args.database, parent_id=args.parent,
-                                 class_name=args.class_name, summary=args.summary,
+                                 props=args.prop, title_prop=args.title_prop,
                                  dry_run=False)
             print(f"页面已创建: https://www.notion.so/{page_id.replace('-', '')}")
     except Exception as e:
