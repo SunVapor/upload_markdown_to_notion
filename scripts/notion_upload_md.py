@@ -421,7 +421,10 @@ def _build_table_blocks(lines: list[str]) -> list[dict]:
     for row in rows:
         while len(row) < col_count:
             row.append("")
-        cells = [parse_inline(c) if parse_inline(c) else [{"type": "text", "text": {"content": c}}] for c in row]
+        cells = []
+        for c in row:
+            parsed = parse_inline(c)
+            cells.append(parsed if parsed else [{"type": "text", "text": {"content": c}}])
         children.append({
             "object": "block",
             "type": "table_row",
@@ -588,7 +591,6 @@ Examples:
 
     args = parser.parse_args()
 
-
     filepath = Path(args.file)
     if not filepath.exists():
         print(f"Error: file not found: {args.file}", file=sys.stderr)
@@ -620,7 +622,7 @@ Examples:
 
     token = resolve_token()
     if not token:
-        print("Error: NOTION_TOKEN not found. Set the environment variable or create ~/.notion_token", file=sys.stderr)
+        print("Error: NOTION_TOKEN not found. Set the env var or create ~/.notion_token", file=sys.stderr)
         print("Create one at: https://www.notion.so/my-integrations", file=sys.stderr)
         sys.exit(1)
 
