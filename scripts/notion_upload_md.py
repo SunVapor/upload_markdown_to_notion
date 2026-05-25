@@ -16,8 +16,8 @@ Options:
     --database DB_ID       Target database ID
     --parent PAGE_ID       Target parent page ID
     --title TITLE          Page title (default: filename stem)
-    --class-name NAME      Database select property value (if applicable)
-    --summary TEXT         Database text property value (if applicable)
+    --title-prop NAME      Title property name (default: Name)
+    --prop KEY=VALUE       Database property (repeatable). Supports Key:type=Value
     --update PAGE_ID       Replace all content of an existing page
     --append PAGE_ID       Append content to an existing page
     --dry-run              Print generated blocks without writing to Notion
@@ -455,14 +455,13 @@ def _write_blocks(client: Client, parent_id: str, blocks: list[dict]):
 def create_page(client: Client, title: str, content: str, *,
                 database_id: str = "", parent_id: str = "",
                 props: list[str] | None = None, title_prop: str = "Name",
-                class_name: str = "", summary: str = "",
                 dry_run: bool = False) -> str:
     """Create a new Notion page and fill it with content blocks.
 
-    props: list of "key=value" strings for generic rich_text properties.
+    props: list of "key=value" strings for database property values.
+           Supports type annotation: "Key:type=Value" (select, number, date, checkbox).
+           Defaults to rich_text if no type given.
     title_prop: name of the title property in the database (default "Name").
-    class_name: shorthand that creates a select property named "Class".
-    summary: shorthand that creates a rich_text property named "内容".
     """
     if props is None:
         props = []
@@ -500,16 +499,11 @@ def create_page(client: Client, title: str, content: str, *,
                 properties[k] = {"checkbox": v.lower() in ("yes", "true", "1", "checked")}
             else:
                 properties[k] = {"rich_text": [{"text": {"content": v}}]}
-        # Shorthand: --class-name → select property (not rich_text)
-        if class_name:
-            properties["Class"] = {"select": {"name": class_name}}
-        if summary:
-            properties["内容"] = {"rich_text": [{"text": {"content": summary}}]}
     elif parent_id:
         parent = {"type": "page_id", "page_id": parent_id.replace("-", "")}
         properties = {"title": [{"text": {"content": title}}]}
     else:
-        print("错误: 需要 --database 或 --parent 指定目标位置", file=sys.stderr)
+        print("Error: --database or --parent is required", file=sys.stderr)
         return "error"
 
     blocks = md_to_blocks(content)
@@ -566,7 +560,7 @@ def main():
 Examples:
     # Create page in a database (with property values)
     python3 notion_upload_md.py notes.md --database YOUR_DB_ID \\
-        --title "My Note" --class-name "Course" --summary "Key takeaways"
+        --title "My Note" --prop "Tags:select=course" --prop "Status=draft"
 
     # Create page under a parent page
     python3 notion_upload_md.py notes.md --parent PAGE_ID --title "My Notes"
@@ -588,20 +582,16 @@ Examples:
     parser.add_argument("--title-prop", default="Name", help="Name of the title property in the database (default: Name)")
     parser.add_argument("--prop", action="append", default=[], metavar="KEY=VALUE",
                         help="Database property (repeatable). e.g. --prop 'Tags=important'")
-    parser.add_argument("--class-name", default="", help="[shorthand] Same as --prop 'Class=VALUE'")
-    parser.add_argument("--summary", default="", help="[shorthand] Same as --prop '内容=VALUE'")
     parser.add_argument("--update", default="", help="Replace all content of an existing page ID")
     parser.add_argument("--append", default="", help="Append content to an existing page ID")
     parser.add_argument("--dry-run", action="store_true", help="Print blocks without writing to Notion")
 
     args = parser.parse_args()
 
-    # Shorthand: --class-name / --summary are handled in create_page() directly
-    # (class_name → select type, summary → rich_text)
 
     filepath = Path(args.file)
     if not filepath.exists():
-        print(f"错误: 文件不存在: {args.file}", file=sys.stderr)
+        print(f"Error: file not found: {args.file}", file=sys.stderr)
         sys.exit(1)
 
     content = filepath.read_text(encoding="utf-8")
@@ -625,14 +615,13 @@ Examples:
             create_page(None, title, content,
                        database_id=args.database, parent_id=args.parent,
                        props=args.prop, title_prop=args.title_prop,
-                       class_name=args.class_name, summary=args.summary,
                        dry_run=True)
         return
 
     token = resolve_token()
     if not token:
-        print("错误: 未找到 Notion token。请设置环境变量 NOTION_TOKEN", file=sys.stderr)
-        print("获取 Integration Token: https://www.notion.so/my-integrations", file=sys.stderr)
+        print("Error: NOTION_TOKEN not found. Set the environment variable or create ~/.notion_token", file=sys.stderr)
+        print("Create one at: https://www.notion.so/my-integrations", file=sys.stderr)
         sys.exit(1)
 
     client = Client(auth=token)
@@ -641,23 +630,22 @@ Examples:
         if args.update:
             replace_page_content(client, args.update, content)
             pid = args.update.replace("-", "")
-            print(f"页面已更新: https://www.notion.so/{pid}")
+            print(f"Page updated: https://www.notion.so/{pid}")
         elif args.append:
             append_to_page(client, args.append, content)
             pid = args.append.replace("-", "")
-            print(f"内容已追加: https://www.notion.so/{pid}")
+            print(f"Content appended: https://www.notion.so/{pid}")
         else:
             page_id = create_page(client, title, content,
                                  database_id=args.database, parent_id=args.parent,
                                  props=args.prop, title_prop=args.title_prop,
-                                 class_name=args.class_name, summary=args.summary,
                                  dry_run=False)
-            print(f"页面已创建: https://www.notion.so/{page_id.replace('-', '')}")
+            print(f"Page created: https://www.notion.so/{page_id.replace('-', '')}")
     except APIResponseError as e:
-        print(f"Notion API 错误 [{e.code}]: {e.body}", file=sys.stderr)
+        print(f"Notion API error [{e.code}]: {e.body}", file=sys.stderr)
         sys.exit(1)
     except Exception as e:
-        print(f"错误: {e}", file=sys.stderr)
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
 
